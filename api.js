@@ -1,56 +1,68 @@
-// api.js - Connects the website to the Google Apps Script backend
-// Apps Script එක Deploy කළාම ලැබෙන /exec URL එක මෙතනට දාන්න
-const API_URL = "https://script.google.com/macros/s/AKfycby_ZWUD56ceoDTTfCB-794g1kcPGDANbdyHLXHjm-HCutmGZHQjfk9YeQfq5g5jYNqR/exec";
+/*************************************************
+ * VOID X VPN - API BRIDGE (Vercel <-> Google Apps Script)
+ * google.script.run වෙනුවට fetch() පාවිච්චි කරනවා.
+ *************************************************/
 
-async function callApi(action, extra) {
-  if (!API_URL || API_URL.indexOf("PASTE_") === 0) {
-    throw new Error("api.js එකේ API_URL එක තවම දාලා නැහැ.");
+// >>> ඔබගේ Apps Script Web App URL එක මෙතනට දාන්න (/exec වලින් ඉවර වෙන එක) <<<
+const API_URL = "https://script.google.com/macros/s/AKfycbyGFLMlIoS1DBh9f7yIFn0HBigZnLVpT_Hge8u60f6bTBybVxiIKpIj6YXm9eZQj4I/exec";
+
+(function () {
+  // method name + arguments -> REST body
+  function buildBody(method, args) {
+    switch (method) {
+      case "getPublicData": return { action: "publicData" };
+      case "adminLogin":    return { action: "adminLogin", username: args[0], password: args[1] };
+      case "adminLogout":   return { action: "adminLogout", token: args[0] };
+      case "getAdminData":  return { action: "adminData", token: args[0] };
+      case "addPackage":
+      case "updatePackage":
+      case "addConfig":
+      case "updateConfig":  return { action: method, token: args[0], data: args[1] };
+      case "deletePackage":
+      case "deleteConfig":
+      case "deleteEhiFile": return { action: method, token: args[0], data: { id: args[1] } };
+      case "addEhiFile":
+        return { action: "addEhiFile", token: args[0],
+          data: { packageId: args[1], name: args[2], fileName: args[3], dataUrl: args[4] } };
+      default: return { action: method, token: args[0], data: args[1] };
+    }
   }
-  const res = await fetch(API_URL, {
-    method: "POST",
-    // text/plain පාවිච්චි කරන්නේ CORS preflight වළක්වන්න
-    headers: { "Content-Type": "text/plain;charset=utf-8" },
-    body: JSON.stringify(Object.assign({ action: action }, extra || {}))
-  });
-  if (!res.ok) throw new Error("Network error: " + res.status);
-  const json = await res.json();
-  if (json.status !== "success") throw new Error(json.message || "Server error");
-  return json.data;
-}
 
-const methods = {
-  getPublicData: () => callApi("publicData"),
-  adminLogin: (u, p) => callApi("adminLogin", { username: u, password: p }),
-  adminLogout: t => callApi("adminLogout", { token: t }),
-  getAdminData: t => callApi("adminData", { token: t }),
-  addPackage: (t, d) => callApi("addPackage", { token: t, data: d }),
-  updatePackage: (t, d) => callApi("updatePackage", { token: t, data: d }),
-  deletePackage: (t, id) => callApi("deletePackage", { token: t, data: { id: id } }),
-  addConfig: (t, d) => callApi("addConfig", { token: t, data: d }),
-  updateConfig: (t, d) => callApi("updateConfig", { token: t, data: d }),
-  deleteConfig: (t, id) => callApi("deleteConfig", { token: t, data: { id: id } }),
-  addEhiFile: (t, pid, name, fileName, dataUrl) =>
-    callApi("addEhiFile", {
-      token: t,
-      data: { packageId: pid, name: name, fileName: fileName, dataUrl: dataUrl }
-    }),
-  deleteEhiFile: (t, id) => callApi("deleteEhiFile", { token: t, data: { id: id } })
-};
+  async function callApi(method, args) {
+    if (!API_URL || API_URL.indexOf("script.google.com") === -1) {
+      throw new Error("API_URL is not set in api.js");
+    }
+    // text/plain => CORS preflight එකක් නැහැ (Apps Script එකට ඕන)
+    const res = await fetch(API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify(buildBody(method, args)),
+      redirect: "follow"
+    });
+    const json = await res.json();
+    if (!json || json.status !== "success") {
+      throw new Error((json && json.message) || "Server error");
+    }
+    return json.data;
+  }
 
-// google.script.run emulate කරනවා
-function makeRunner(onOk, onFail) {
-  const r = {
-    withSuccessHandler: fn => makeRunner(fn, onFail),
-    withFailureHandler: fn => makeRunner(onOk, fn)
-  };
-  Object.keys(methods).forEach(name => {
-    r[name] = (...args) => {
-      methods[name](...args)
-        .then(v => onOk && onOk(v))
-        .catch(e => onFail && onFail(e));
-    };
-  });
-  return r;
-}
+  // google.script.run එකට සමාන interface එකක්
+  function makeRunner(success, failure) {
+    return new Proxy({}, {
+      get(_, prop) {
+        if (prop === "withSuccessHandler") return fn => makeRunner(fn, failure);
+        if (prop === "withFailureHandler") return fn => makeRunner(success, fn);
+        return (...args) => {
+          callApi(prop, args)
+            .then(data => success && success(data))
+            .catch(err => failure && failure(err));
+        };
+      }
+    });
+  }
 
-window.google = { script: { run: makeRunner() } };
+  window.google = window.google || {};
+  window.google.script = window.google.script || {};
+  window.google.script.run = makeRunner(null, null);
+  window.voidApi = callApi;
+})();
